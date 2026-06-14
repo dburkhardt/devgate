@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Publish a remote artifact through devgate.")
+    parser.add_argument("path")
+    args = parser.parse_args()
+
+    config = _load_config()
+    source = Path(args.path).expanduser().resolve()
+    if not source.exists():
+        raise SystemExit(f"not found: {source}")
+
+    artifact_root = Path(os.path.expanduser(config["artifact_root"]))
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    publish_dir = artifact_root / _publish_name(source)
+    publish_dir.mkdir(parents=True, exist_ok=True)
+
+    if source.is_dir():
+        output = publish_dir / source.name
+        _link_or_copy(source, output)
+        url_path = f"{publish_dir.name}/{quote(source.name)}/"
+    else:
+        output = publish_dir / source.name
+        if source.suffix.lower() == ".ipynb" and _nbconvert(source, publish_dir):
+            html_name = source.with_suffix(".html").name
+            url_path = f"{publish_dir.name}/{quote(html_name)}"
+            output = publish_dir / html_name
+        elif source.suffix.lower() in {".md", ".markdown"}:
+            shutil.copy2(source, output)
+            rendered = publish_dir / (source.stem + ".html")
+            rendered.write_text(_render_markdown(source.read_text(encoding="utf-8")), encoding="utf-8")
+            output = rendered
+            url_path = f"{publish_dir.name}/{quote(rendered.name)}"
+        else:
+            _link_or_copy(source, output)
+            url_path = f"{publish_dir.name}/{quote(source.name)}"
+
+    base_url = config["artifact_base_url"].rstrip("/") + "/"
+    print(f"remote artifact: {output}")
+    print(f"local url: {base_url}{url_path}")
+    return 0
+
+
+def _load_config() -> dict:
+    path = Path(os.path.expanduser("~/.devgate/effective-config.json"))
+    if not path.exists():
+        raise SystemExit(f"missing effective config: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _publish_name(source: Path) -> str:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in source.name)
+    return f"{stamp}-{safe}"
+
+
+def _link_or_copy(source: Path, output: Path) -> None:
+    if output.exists() or output.is_symlink():
+        if output.is_dir() and not output.is_symlink():
+            shutil.rmtree(output)
+        else:
+            output.unlink()
+    try:
+        output.symlink_to(source, target_is_directory=source.is_dir())
+    except OSError:
+        if source.is_dir():
+            shutil.copytree(source, output)
+        else:
+            shutil.copy2(source, output)
+
+
+def _nbconvert(source: Path, output_dir: Path) -> bool:
+    if not shutil.which("jupyter"):
+        return False
+    result = subprocess.run(
+        ["jupyter", "nbconvert", "--to", "html", "--output-dir", str(output_dir), str(source)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _render_markdown(markdown: str) -> str:
+    body: list[str] = []
+    in_code = False
+    for line in markdown.splitlines():
+        if line.strip().startswith("```"):
+            if in_code:
+                body.append("</code></pre>")
+            else:
+                body.append("<pre><code>")
+            in_code = not in_code
+            continue
+        escaped = html.escape(line)
+        if in_code:
+            body.append(escaped)
+        elif escaped.startswith("# "):
+            body.append(f"<h1>{escaped[2:]}</h1>")
+        elif escaped.startswith("## "):
+            body.append(f"<h2>{escaped[3:]}</h2>")
+        elif escaped.startswith("### "):
+            body.append(f"<h3>{escaped[4:]}</h3>")
+        elif not escaped.strip():
+            body.append("")
+        else:
+            body.append(f"<p>{escaped}</p>")
+    if in_code:
+        body.append("</code></pre>")
+    return """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>devgate artifact</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+    pre { background: #f6f8fa; overflow: auto; padding: 12px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+""" + "\n".join(body) + "\n</body>\n</html>\n"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

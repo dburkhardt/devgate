@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+from pathlib import Path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Choose or validate a devgate forwarded port.")
+    parser.add_argument("port", nargs="?", type=int)
+    parser.add_argument("--pick", choices=["web", "api", "vite", "tensorboard", "jupyter", "gradio", "misc", "debug", "tool"])
+    args = parser.parse_args()
+
+    config = _load_config()
+    forwarded = set(int(port) for port in config.get("forwarded_ports", []))
+
+    if args.port is not None:
+        if args.port not in forwarded:
+            raise SystemExit(f"port {args.port} is not forwarded by devgate")
+        print(args.port)
+        return 0
+
+    if not args.pick:
+        raise SystemExit("use --pick <category> or provide a port to validate")
+
+    categories = config.get("port_categories", {})
+    for port in categories.get(args.pick, []):
+        port = int(port)
+        if port in forwarded and _remote_port_available(port):
+            print(port)
+            return 0
+    raise SystemExit(f"no available forwarded port in category {args.pick!r}")
+
+
+def _remote_port_available(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _load_config() -> dict:
+    path = Path(os.path.expanduser("~/.devgate/effective-config.json"))
+    if not path.exists():
+        raise SystemExit(f"missing effective config: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

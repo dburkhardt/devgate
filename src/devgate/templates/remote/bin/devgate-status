@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+
+def main() -> int:
+    config = _load_config()
+    print(f"artifact root: {config['artifact_root']}")
+    print(f"artifact url: {config['artifact_base_url']}")
+    print(f"forwarded ports: {len(config.get('forwarded_ports', []))}")
+    for name, ports in config.get("port_categories", {}).items():
+        print(f"{name}: {_compact_ports([int(port) for port in ports])}")
+    skipped = config.get("skipped_ports", [])
+    if skipped:
+        print(f"skipped: {_compact_ports([int(port) for port in skipped])}")
+    return 0
+
+
+def _load_config() -> dict:
+    path = Path(os.path.expanduser("~/.devgate/effective-config.json"))
+    if not path.exists():
+        raise SystemExit(f"missing effective config: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _compact_ports(ports: list[int]) -> str:
+    if not ports:
+        return "(none)"
+    ports = sorted(ports)
+    runs: list[str] = []
+    start = prev = ports[0]
+    for port in ports[1:]:
+        if port == prev + 1:
+            prev = port
+            continue
+        runs.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = port
+    runs.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(runs)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
