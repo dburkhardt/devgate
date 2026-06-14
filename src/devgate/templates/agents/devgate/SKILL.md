@@ -21,6 +21,17 @@ npm run dev -- --host 127.0.0.1 --port "$PORT"
 
 Report local browser URLs as `http://localhost:<port>/`, not remote host URLs.
 
+## Local Mirror
+
+The remote machine remains the source of truth. devgate may sync selected remote
+paths into a local mirror such as `~/Remote/<host>` using Mutagen, but that mirror
+is for local reading, search, and inspection.
+
+- Do not write into the local mirror as a way to change remote files.
+- Make project edits in the remote workspace where you are running.
+- If the user needs a durable, inspectable output, publish it with `devgate-show`
+  instead of relying on the local mirror path.
+
 ## Artifacts
 
 Publish files the user should inspect with:

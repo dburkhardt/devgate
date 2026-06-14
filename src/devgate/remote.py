@@ -29,6 +29,7 @@ def build_effective_config(host: HostConfig, plan: PortPlan) -> dict[str, Any]:
         "remote_state_dir": host.remote_state_dir,
         "helper_bin": f"{host.remote_state_dir.rstrip('/')}/bin",
         "agents": asdict(host.agents),
+        "mirror": asdict(host.mirror),
     }
 
 

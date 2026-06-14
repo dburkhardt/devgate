@@ -31,6 +31,10 @@ class HostState:
     def resolved_config_file(self) -> Path:
         return self.root / "resolved-config.json"
 
+    @property
+    def mirror_state_file(self) -> Path:
+        return self.root / "mirror.json"
+
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 

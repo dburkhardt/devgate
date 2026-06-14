@@ -13,6 +13,7 @@ from devgate.ports import build_port_plan
 from devgate.remote import build_effective_config, install_remote_files, run_remote_helper
 from devgate.ssh import stop_tunnel
 from devgate.state import HostState
+from devgate.sync import mirror_down, mirror_flush, mirror_pause, mirror_status, reconcile_mirror
 from devgate.terminal import open_shell
 
 COMMANDS = {
@@ -24,6 +25,7 @@ COMMANDS = {
     "ports",
     "show",
     "down",
+    "sync",
 }
 
 
@@ -55,12 +57,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     connect = subparsers.add_parser("connect", help="reconcile backend, then open a shell")
     connect.add_argument("host")
+    connect.add_argument("--no-sync", action="store_true", help="skip mirror sync reconciliation")
 
     up = subparsers.add_parser("up", help="reconcile backend only")
     up.add_argument("host")
+    up.add_argument("--no-sync", action="store_true", help="skip mirror sync reconciliation")
 
     shell = subparsers.add_parser("shell", help="reconcile backend, then open a shell")
     shell.add_argument("host")
+    shell.add_argument("--no-sync", action="store_true", help="skip mirror sync reconciliation")
 
     status_parser = subparsers.add_parser("status", help="show tunnel and artifact status")
     status_parser.add_argument("host")
@@ -86,17 +91,39 @@ def _build_parser() -> argparse.ArgumentParser:
     down = subparsers.add_parser("down", help="stop the devgate-owned SSH tunnel")
     down.add_argument("host")
 
+    sync = subparsers.add_parser("sync", help="manage configured local mirror sessions")
+    sync_subparsers = sync.add_subparsers(dest="sync_command", required=True)
+
+    sync_up = sync_subparsers.add_parser("up", help="create or resume mirror sync sessions")
+    sync_up.add_argument("host")
+
+    sync_status = sync_subparsers.add_parser("status", help="show mirror sync status")
+    sync_status.add_argument("host")
+    sync_status.add_argument("--json", action="store_true", help="print JSON")
+
+    sync_flush = sync_subparsers.add_parser("flush", help="wait for mirror sync to settle")
+    sync_flush.add_argument("host")
+    sync_flush.add_argument("path_name", nargs="?")
+
+    sync_pause = sync_subparsers.add_parser("pause", help="pause mirror sync sessions")
+    sync_pause.add_argument("host")
+    sync_pause.add_argument("path_name", nargs="?")
+
+    sync_down = sync_subparsers.add_parser("down", help="terminate devgate-owned mirror sessions")
+    sync_down.add_argument("host")
+    sync_down.add_argument("path_name", nargs="?")
+
     return parser
 
 
 def _dispatch(args: argparse.Namespace) -> int:
     command = args.command
     if command in {"connect", "shell"}:
-        result = reconcile(args.host, args.config)
+        result = reconcile(args.host, args.config, sync_mirror=not args.no_sync)
         _print_reconcile(result)
         return open_shell(result.host)
     if command == "up":
-        result = reconcile(args.host, args.config)
+        result = reconcile(args.host, args.config, sync_mirror=not args.no_sync)
         _print_reconcile(result)
         return 0
     if command == "status":
@@ -152,7 +179,35 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"stopped devgate tunnel for {host.name}")
             return 0
         raise DevgateError(f"could not stop devgate tunnel for {host.name}")
+    if command == "sync":
+        return _dispatch_sync(args)
     raise DevgateError(f"unknown command {command!r}")
+
+
+def _dispatch_sync(args: argparse.Namespace) -> int:
+    host = load_host(args.host, args.config)
+    state = HostState.for_host(host.name)
+    if args.sync_command == "up":
+        payload = reconcile_mirror(host, state)
+        _print_sync_status(payload)
+        return 0
+    if args.sync_command == "status":
+        payload = mirror_status(host, state)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            _print_sync_status(payload)
+        return 0
+    if args.sync_command == "flush":
+        _print_sync_status(mirror_flush(host, state, args.path_name))
+        return 0
+    if args.sync_command == "pause":
+        _print_sync_status(mirror_pause(host, state, args.path_name))
+        return 0
+    if args.sync_command == "down":
+        _print_sync_status(mirror_down(host, state, args.path_name))
+        return 0
+    raise DevgateError(f"unknown sync command {args.sync_command!r}")
 
 
 def _print_reconcile(result) -> None:
@@ -167,6 +222,9 @@ def _print_reconcile(result) -> None:
     if result.installed_files:
         print(f"remote helpers: {result.host.remote_state_dir}/bin")
         print(f"agent instructions: {result.host.agents.install_dir}/devgate")
+    if result.mirror_status:
+        print(f"mirror root: {result.mirror_status['root']}")
+        print(f"mirror sessions: {len(result.mirror_status.get('configured', []))}")
 
 
 def _print_status(info: dict) -> None:
@@ -182,6 +240,12 @@ def _print_status(info: dict) -> None:
         skipped = resolved.get("skipped_ports", [])
         if skipped:
             print(f"skipped ports: {len(skipped)}")
+    mirror = info.get("mirror", {})
+    if mirror.get("enabled"):
+        print(f"mirror root: {mirror.get('root')}")
+        print(f"mirror configured: {len(mirror.get('configured', []))}")
+        if mirror.get("removed"):
+            print(f"mirror removed: {len(mirror.get('removed', []))}")
 
 
 def _print_ports(payload: dict) -> None:
@@ -210,3 +274,19 @@ def _compact_ports(ports: list[int]) -> str:
         start = prev = port
     runs.append(str(start) if start == prev else f"{start}-{prev}")
     return ", ".join(runs)
+
+
+def _print_sync_status(payload: dict) -> None:
+    print(f"mirror: {'enabled' if payload.get('enabled') else 'disabled'}")
+    print(f"root: {payload.get('root', '(none)')}")
+    print(f"configured: {len(payload.get('configured', []))}")
+    print(f"active: {len(payload.get('active', []))}")
+    paused = payload.get("paused", [])
+    conflicted = payload.get("conflicted", [])
+    removed = payload.get("removed", [])
+    if paused:
+        print(f"paused: {', '.join(paused)}")
+    if conflicted:
+        print(f"conflicted: {', '.join(conflicted)}")
+    if removed:
+        print(f"removed: {', '.join(removed)}")

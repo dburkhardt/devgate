@@ -9,6 +9,8 @@ inside remote shells and agent instructions.
 - Keep SSH as the control plane and Mosh/tmux as the interactive path.
 - Make forwarded `localhost` the universal interface; do not make the remote
   filesystem pretend to be local.
+- Mirror only explicitly configured remote paths into a host-scoped local directory;
+  remote remains the source of truth.
 - Bind local forwards and remote helper services to `127.0.0.1` by default.
 - Prefer boring, inspectable behavior over background magic.
 - Keep commercial-license dependencies out of the core path.
@@ -23,11 +25,12 @@ tests for that surface, and one short handoff note per stage.
 | Integration Lead | Stage contract, public CLI shape, merge order, release gates | Deep implementation inside each lane |
 | CLI and Config Agent | `dvg` command UX, config parsing, defaults, help text, errors | SSH process internals, remote helper scripts |
 | Tunnel and Ports Agent | SSH tunnel lifecycle, state files, port plans, collision policy | Artifact rendering, agent docs |
+| Mirror Sync Agent | Mutagen sessions, mirror state, `dvg sync` commands, mirror doctor checks | Artifact publishing, remote helper scripts |
 | Remote Helpers Agent | `devgate-show`, `devgate-port`, `devgate-artifacts`, `devgate-status` | Local CLI parser and package metadata |
 | Agent Instructions Agent | Codex, Claude, generic/Droid instruction packs | Tunnel implementation |
 | QA Agent | Unit tests, integration tests, smoke scripts, CI matrix | Product decisions |
 | Security Agent | Threat model, bind checks, command/path quoting, dependency review | Feature polish |
-| Docs and Release Agent | README, examples, changelog, PyPI/GitHub release checklist | Security signoff |
+| Docs and Release Agent | README, examples, changelog, GitHub release checklist | Security signoff |
 
 Subagents should work behind contracts: command names, config schema, effective-config
 JSON, helper names, and state-file layout. Contract changes require Integration Lead
@@ -50,12 +53,14 @@ Scope:
 - Confirm repo layout, package metadata, license, README, and contribution path.
 - Keep `dvg` as the documented command; decide whether `devgate` stays as an alias.
 - Add or verify `tests/`, CI, linting, formatting, and minimal smoke fixtures.
-- Document the state directory and remote file layout.
+- Document the state directory, mirror state directory, remote file layout, and GitHub-only
+  release path.
 
 Gate criteria:
 - `uv sync --extra dev`, `uv run dvg --help`, `uv run pytest`, and `uv run ruff check .`
   pass on a clean checkout.
-- `README.md` accurately describes `dvg`, `devgate-*` helpers, config location, and alpha status.
+- `README.md` accurately describes `dvg`, `devgate-*` helpers, mirror config, config
+  location, GitHub install, and alpha status.
 - CI runs on supported Python versions.
 - Security Agent confirms no default public binds and no secret-bearing logs in normal flows.
 
@@ -66,7 +71,7 @@ and remote shell on an SSH-accessible machine.
 
 Scope:
 - `dvg <host>`, `dvg up`, `dvg shell`, `dvg status`, `dvg doctor`, `dvg ports`,
-  `dvg show`, `dvg install-agents`, and `dvg down`.
+  `dvg show`, `dvg install-agents`, `dvg up --no-sync`, and `dvg down`.
 - TOML config with safe defaults when a host has no explicit entry.
 - SSH tunnel process management with config hash, PID file, log file, and restart behavior.
 - Local `127.0.0.1:<port>` to remote `127.0.0.1:<port>` forwards.
@@ -82,7 +87,41 @@ Gate criteria:
 - `doctor` reports local SSH, local Mosh when enabled, local Python, SSH reachability,
   remote Python, remote write permissions, and port-plan status.
 
-## Stage 2: Remote Helper Quality
+## Stage 2: Mutagen Mirror
+
+Goal: selected remote directories are mirrored locally with explicit, inspectable,
+one-way-safe Mutagen sessions.
+
+Scope:
+- Config schema under `[hosts.<host>.mirror]` with `enabled`, `root`, `backend = "mutagen"`,
+  `mode = "one-way-safe"`, and repeated `[[hosts.<host>.mirror.paths]]` entries with
+  `remote` and optional `ignore`.
+- Local mirror state under `~/.local/state/devgate/<host>/mirror.json`, recording remote
+  paths, derived local paths, session names, path hashes, active/removed status, and last
+  reconcile time.
+- Local path naming by remote basename; duplicate basenames get a stable short hash suffix.
+  Removed config entries become inactive and are never deleted by default.
+- `dvg sync up <host>`, `dvg sync status <host> [--json]`, and
+  `dvg sync flush|pause|down <host> [path-name]`.
+- `dvg up <host>` starts mirror reconciliation when enabled; `dvg up <host> --no-sync`
+  skips mirror reconciliation.
+- Mutagen commands use remote alpha and local beta, `--sync-mode=one-way-safe`, and repeated
+  `--ignore` flags.
+- `doctor` checks local Mutagen, SSH/scp viability, mirror root, invalid duplicate paths,
+  paused sessions, and conflicted sessions.
+- README documents Mutagen installation with Homebrew:
+  `brew install mutagen-io/mutagen/mutagen`.
+
+Gate criteria:
+- Unit tests cover mirror config defaults/validation, local path naming, duplicate suffixes,
+  removed path behavior, and Mutagen command construction.
+- CLI tests cover `dvg sync up/status/flush/pause/down`, `dvg up --no-sync`, and JSON status.
+- Integration smoke verifies remote changes appear locally, local edits do not propagate
+  remotely, conflicts are reported, and `dvg sync down` terminates only devgate-owned sessions.
+- Security Agent signs off that local mirror paths cannot escape the configured root and all
+  remote/local paths are safely quoted.
+
+## Stage 3: Remote Helper Quality
 
 Goal: remote helpers are safe, scriptable, and useful to humans and agents.
 
@@ -100,7 +139,7 @@ Gate criteria:
 - Helpers never bind services to public interfaces.
 - Shell quoting and path handling pass Security Agent review.
 
-## Stage 3: Agent Instruction Packs
+## Stage 4: Agent Instruction Packs
 
 Goal: coding agents consistently expose work through forwarded localhost and artifact URLs.
 
@@ -108,6 +147,8 @@ Scope:
 - Canonical instruction pack in `~/.agents/devgate`.
 - Thin adapters for Codex, Claude, and generic/Droid-style agents.
 - Instructions for choosing ports, binding to loopback, publishing artifacts, and reporting URLs.
+- Instructions that remote paths remain the source of truth and agents should not write into
+  the local mirror to change remote state.
 - Compatibility notes for remote shells without all optional tools installed.
 
 Gate criteria:
@@ -118,7 +159,7 @@ Gate criteria:
 - Security Agent signs off that instructions do not encourage public tunnels, `0.0.0.0`, or
   remote port forwarding.
 
-## Stage 4: Artifact Experience
+## Stage 5: Artifact Experience
 
 Goal: common remote outputs are easy to inspect locally.
 
@@ -135,13 +176,14 @@ Gate criteria:
 - Any optional renderer dependency is documented and excluded from the hard core path unless
   intentionally promoted.
 
-## Stage 5: Reliability and UX Hardening
+## Stage 6: Reliability and UX Hardening
 
 Goal: devgate feels predictable across repeated daily use.
 
 Scope:
 - Robust tunnel liveness checks, including a sentinel forwarded port or equivalent probe.
 - Locking around reconcile/down to avoid concurrent state corruption.
+- Locking around mirror reconcile/down to avoid concurrent Mutagen state corruption.
 - Better status output and `--json` contracts for automation.
 - Clear recovery guidance for stale PIDs, changed configs, broken SSH, and remote permission errors.
 - Shell completions and `dvg config init` if the UX needs them.
@@ -153,13 +195,13 @@ Gate criteria:
 - Common failure cases have actionable messages.
 - Manual smoke passes on macOS and at least one Linux local machine.
 
-## Stage 6: Security Review and Beta
+## Stage 7: Security Review and Beta
 
 Goal: harden the public beta before broader installation.
 
 Scope:
 - Written threat model for local machine, SSH host, remote helper files, artifact server,
-  and agent-generated content.
+  Mutagen mirror sessions, local mirror files, and agent-generated content.
 - Audit subprocess calls, shell quoting, remote script generation, file permissions, symlink
   handling, and artifact publishing.
 - Dependency and license review.
@@ -172,22 +214,25 @@ Gate criteria:
 - Dependency licenses are compatible with open-source distribution.
 - Beta release candidate has no known high-severity security issues.
 
-## Stage 7: Release and Publish
+## Stage 8: GitHub Release
 
-Goal: ship a clean open-source release that users can install and trust.
+Goal: ship a clean open-source release through GitHub that users can install and trust.
 
 Scope:
 - Finalize versioning, changelog, license, contribution guide, issue templates, and support policy.
-- Build and verify source distribution and wheel.
-- Publish to TestPyPI, install with `uv tool install`, then publish to PyPI.
+- Build and verify source distribution and wheel artifacts locally.
 - Create GitHub release with signed tag if available.
-- Optional follow-up packaging: Homebrew formula, standalone installer notes, shell completions.
+- Attach release artifacts to GitHub Releases.
+- Document install with `uv tool install git+https://github.com/dburkhardt/devgate.git@v1.0.0`.
+- State explicitly that devgate is not published to PyPI.
+- Optional follow-up docs: standalone installer notes and shell completions.
 
 Gate criteria:
 - `python -m build` or the chosen build command produces clean artifacts.
-- TestPyPI install verifies `dvg --version`, `dvg --help`, and a no-config host path.
-- PyPI metadata points to `https://github.com/dburkhardt/devgate`.
-- GitHub release includes changelog, install instructions, known limitations, and security model.
+- GitHub URL install verifies `dvg --version`, `dvg --help`, and a no-config host path.
+- GitHub release includes changelog, install instructions, wheel/source artifacts, known
+  limitations, and security model.
+- No TestPyPI or PyPI publish job exists in CI or release docs.
 - Release is reproducible from a clean checkout.
 
 ## v1 Gate
@@ -198,18 +243,21 @@ v1 requires:
 - Remote helpers and agent instructions are installed idempotently.
 - CI, unit tests, integration smoke tests, and security tests pass.
 - Public docs cover install, quick start, config, commands, security model, troubleshooting,
-  and agent workflows.
+  mirror setup, Mutagen installation, and agent workflows.
 - At least one pre-v1 user feedback cycle has been incorporated or explicitly deferred.
 
 ## Verification Matrix
 
-- Unit: config parsing, port expansion, collision policy, state hashing, helper config parsing.
+- Unit: config parsing, mirror config, port expansion, collision policy, state hashing,
+  helper config parsing.
 - CLI: parser behavior, help text, JSON output, expected error messages.
 - Local integration: tunnel command construction, state reuse/restart, down cleanup.
+- Mirror integration: Mutagen command construction, session lifecycle, one-way-safe behavior,
+  conflict reporting, and removed-path handling.
 - Remote integration: helper installation, artifact server, helper commands, Mosh/tmux fallback.
 - Security: loopback bind assertions, shell quoting, path traversal, file permissions,
   dependency/license audit.
-- Release: clean build, TestPyPI install, `uv tool install`, GitHub release smoke.
+- Release: clean build, GitHub URL install, `uv tool install`, GitHub release smoke.
 
 ## Open Questions
 

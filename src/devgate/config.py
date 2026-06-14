@@ -68,6 +68,21 @@ class AgentsConfig:
 
 
 @dataclass(frozen=True)
+class MirrorPathConfig:
+    remote: str
+    ignore: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MirrorConfig:
+    enabled: bool = False
+    root: str = ""
+    backend: str = "mutagen"
+    mode: str = "one-way-safe"
+    paths: list[MirrorPathConfig] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class HostConfig:
     name: str
     ssh_host: str
@@ -78,6 +93,7 @@ class HostConfig:
     ports: PortsConfig = field(default_factory=PortsConfig)
     artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
+    mirror: MirrorConfig = field(default_factory=MirrorConfig)
 
     def fingerprint(self) -> str:
         payload = asdict(self)
@@ -108,6 +124,7 @@ class AppConfig:
             ports=_parse_ports(table.get("ports", {})),
             artifacts=_parse_artifacts(artifact_table),
             agents=agents,
+            mirror=_parse_mirror(name, table.get("mirror", {})),
         )
         _validate_host(host)
         return host
@@ -170,6 +187,23 @@ def _parse_agents(table: dict[str, Any]) -> AgentsConfig:
     )
 
 
+def _parse_mirror(host_name: str, table: dict[str, Any]) -> MirrorConfig:
+    root = str(table.get("root", f"~/Remote/{host_name}"))
+    return MirrorConfig(
+        enabled=bool(table.get("enabled", False)),
+        root=root,
+        backend=str(table.get("backend", "mutagen")),
+        mode=str(table.get("mode", "one-way-safe")),
+        paths=[
+            MirrorPathConfig(
+                remote=str(item.get("remote", "")).strip(),
+                ignore=[str(pattern) for pattern in item.get("ignore", [])],
+            )
+            for item in table.get("paths", [])
+        ],
+    )
+
+
 def _merge_agents(base: AgentsConfig, override: dict[str, Any]) -> AgentsConfig:
     if not override:
         return base
@@ -196,3 +230,12 @@ def _validate_host(host: HostConfig) -> None:
         raise DevgateError("artifacts.server_port must be between 1 and 65535")
     if host.artifacts.server_bind != "127.0.0.1":
         raise DevgateError("artifacts.server_bind must be 127.0.0.1 for this release")
+    if host.mirror.backend != "mutagen":
+        raise DevgateError("mirror.backend must be mutagen for this release")
+    if host.mirror.mode != "one-way-safe":
+        raise DevgateError("mirror.mode must be one-way-safe for this release")
+    if not host.mirror.root.strip():
+        raise DevgateError("mirror.root cannot be empty")
+    for item in host.mirror.paths:
+        if not item.remote:
+            raise DevgateError("mirror path remote cannot be empty")

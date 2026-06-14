@@ -13,6 +13,7 @@ from devgate.ports import PortPlan, build_port_plan
 from devgate.remote import build_effective_config, ensure_artifact_server, install_remote_files
 from devgate.ssh import check_ssh_reachable, start_tunnel, stop_tunnel
 from devgate.state import HostState, is_pid_alive
+from devgate.sync import mirror_doctor_checks, mirror_status, reconcile_mirror
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ReconcileResult:
     tunnel_status: str
     artifact_status: dict[str, Any] | None
     installed_files: bool
+    mirror_status: dict[str, Any] | None
 
 
 def load_host(host_name: str, config_path: str | Path | None = None) -> HostConfig:
@@ -36,6 +38,7 @@ def reconcile(
     *,
     install_files: bool = True,
     start_artifacts: bool = True,
+    sync_mirror: bool = True,
     require_ssh: bool = True,
 ) -> ReconcileResult:
     host = load_host(host_name, config_path)
@@ -73,6 +76,7 @@ def reconcile(
         install_remote_files(host, effective_config)
 
     artifact_status = ensure_artifact_server(host) if start_artifacts else None
+    sync_status = reconcile_mirror(host, state) if sync_mirror and host.mirror.enabled else None
 
     state.write_resolved(
         {
@@ -87,6 +91,7 @@ def reconcile(
             "artifact_base_url": effective_config["artifact_base_url"],
             "remote_state_dir": host.remote_state_dir,
             "remote_artifact_dir": host.artifacts.remote_dir,
+            "mirror": sync_status or mirror_status(host, state, refresh=False),
         }
     )
 
@@ -98,6 +103,7 @@ def reconcile(
         tunnel_status=tunnel_status,
         artifact_status=artifact_status,
         installed_files=install_files,
+        mirror_status=sync_status,
     )
 
 
@@ -112,6 +118,7 @@ def status(host_name: str, config_path: str | Path | None = None) -> dict[str, A
         "state_dir": str(state.root),
         "pid": pid,
         "tunnel_alive": is_pid_alive(pid),
+        "mirror": mirror_status(host, state, refresh=False),
         "resolved": resolved,
     }
 
@@ -130,6 +137,7 @@ def doctor(host_name: str, config_path: str | Path | None = None) -> list[tuple[
 
     checks.append(("ssh reachable", check_ssh_reachable(host), host.ssh_host))
     checks.append(("port plan", _port_plan_ok(host), "local bind checks"))
+    checks.extend(mirror_doctor_checks(host, HostState.for_host(host.name)))
     return checks
 
 

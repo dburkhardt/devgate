@@ -7,3 +7,7 @@ This remote environment uses devgate. Read and follow:
 In short: bind servers to `127.0.0.1`, choose forwarded ports with `devgate-port`,
 publish inspectable files with `devgate-show`, and report local URLs as
 `http://localhost:<port>/`.
+
+The remote machine is the source of truth. A local mirror such as
+`~/Remote/<host>` may exist for inspection only; do not write there to affect
+remote files.
